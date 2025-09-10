@@ -151,6 +151,9 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     const folder = await client.findOrCreateBookmarkFolder(folderName);
     console.log(`📁 Using folder: "${folderName}" (ID: ${folder.id})`);
 
+    // Clean up already watched/rated content from AI bookmark folders
+    await cleanupWatchedFromAIFolders(client, db, contentType);
+
     // Search for each recommendation on kino.pub and add to bookmarks
     console.log('\n🔍 Searching for recommendations on kino.pub...');
     let addedCount = 0;
@@ -281,6 +284,7 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
         console.log('- Run "npm run scan-bookmarks movies-ai" and "npm run scan-bookmarks tv-shows-ai" to update your local cache');
       }
       console.log('- Check your kino.pub bookmarks to start watching!');
+      console.log('- Already watched items are automatically removed from AI folders to keep recommendations fresh');
     }
 
   } catch (error) {
@@ -288,6 +292,85 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     process.exit(1);
   } finally {
     db.close();
+  }
+}
+
+/**
+ * Clean up already watched or rated content from AI bookmark folders
+ */
+async function cleanupWatchedFromAIFolders(
+  client: KinoPubClient, 
+  db: DatabaseService, 
+  contentType: 'movie' | 'serial' | 'both'
+): Promise<void> {
+  console.log('\n🧹 Cleaning up watched/rated content from AI bookmark folders...');
+
+  try {
+    // Get all watched items (both fully watched and rated items)
+    const watchedItems = await db.getWatchedItems();
+    const watchedKinoPubIds = new Set(watchedItems.map(item => item.kinoPubId));
+    
+    console.log(`📚 Found ${watchedItems.length} watched/rated items to check for removal`);
+
+    // Determine which folders to clean based on content type
+    const foldersToClean: string[] = [];
+    if (contentType === 'movie') {
+      foldersToClean.push('movies-ai');
+    } else if (contentType === 'serial') {
+      foldersToClean.push('tv-shows-ai');
+    } else {
+      foldersToClean.push('movies-ai', 'tv-shows-ai');
+    }
+
+    let totalRemoved = 0;
+
+    for (const folderName of foldersToClean) {
+      try {
+        // Find the AI folder
+        const aiFolder = await client.findBookmarkFolderByName(folderName);
+        if (!aiFolder) {
+          console.log(`📁 Folder "${folderName}" not found, skipping cleanup`);
+          continue;
+        }
+
+        console.log(`📁 Cleaning folder: "${folderName}" (ID: ${aiFolder.id})`);
+
+        // Get current bookmarks in the AI folder
+        const folderContent = await client.getBookmarkFolder(aiFolder.id);
+        const currentBookmarks = folderContent.data?.items || [];
+        
+        console.log(`🔖 Found ${currentBookmarks.length} items in "${folderName}" folder`);
+
+        let removedFromFolder = 0;
+
+        // Check each bookmark against watched items
+        for (const bookmark of currentBookmarks) {
+          if (watchedKinoPubIds.has(bookmark.id)) {
+            try {
+              console.log(`🗑️  Removing watched item: "${bookmark.title}" from ${folderName}`);
+              await client.removeBookmark(bookmark.id, aiFolder.id);
+              removedFromFolder++;
+              totalRemoved++;
+
+              // Small delay to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+              console.error(`❌ Failed to remove "${bookmark.title}" from ${folderName}:`, error);
+            }
+          }
+        }
+
+        console.log(`✅ Removed ${removedFromFolder} watched items from "${folderName}"`);
+
+      } catch (error) {
+        console.error(`❌ Error cleaning folder "${folderName}":`, error);
+      }
+    }
+
+    console.log(`🧹 Cleanup complete: removed ${totalRemoved} watched items from AI folders`);
+
+  } catch (error) {
+    console.error('❌ Error during AI folder cleanup:', error);
   }
 }
 

@@ -133,8 +133,26 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
    * Remove item from bookmarks
    */
   public async removeBookmark(itemId: number, folderId?: number): Promise<KinoPubApiResponse<any>> {
-    const endpoint = folderId ? `/bookmarks/remove?item=${itemId}&folder=${folderId}` : `/bookmarks/remove?item=${itemId}`;
-    return this.makeAuthenticatedRequest<any>(endpoint, 'POST');
+    const data: any = { item: itemId };
+    if (folderId) {
+      data.folder = folderId;
+    }
+    
+    return this.makeAuthenticatedRequest<any>('/bookmarks/remove-item', 'POST', data);
+  }
+
+  /**
+   * Remove item from bookmarks using the remove-item endpoint
+   * @param item - The item ID to remove
+   * @param folder - Optional folder ID to remove from specific folder
+   */
+  public async removeBookmarkItem(item: number, folder?: number): Promise<KinoPubApiResponse<any>> {
+    const data: any = { item };
+    if (folder !== undefined) {
+      data.folder = folder;
+    }
+    
+    return this.makeAuthenticatedRequest<any>('/bookmarks/remove-item', 'POST', data);
   }
 
   /**
