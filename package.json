@@ -1,0 +1,42 @@
+{
+  "name": "kino-pub-ai-bookmarks",
+  "version": "1.0.0",
+  "description": "AI-powered bookmark management for kino.pub",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "clean": "rm -rf dist",
+
+    "scan-watched": "ts-node src/scripts/scan-watched.ts",
+    "scan-bookmarks": "ts-node src/scripts/scan-bookmarks.ts",
+    "scan-all-bookmarks": "ts-node src/scripts/scan-bookmarks.ts --all",
+    "scan-movies-ai": "ts-node src/scripts/scan-bookmarks.ts movies-ai",
+    "scan-tv-shows-ai": "ts-node src/scripts/scan-bookmarks.ts tv-shows-ai",
+    "rate-content": "ts-node src/scripts/rate-content.ts",
+    "ai-recommend": "ts-node src/scripts/ai-recommend.ts",
+    "ai-recommend-movies": "ts-node src/scripts/ai-recommend.ts --movies",
+    "ai-recommend-shows": "ts-node src/scripts/ai-recommend.ts --shows"
+  },
+  "keywords": [
+    "kino.pub",
+    "ai",
+    "bookmarks",
+    "typescript"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.61.0",
+    "@types/sqlite3": "^3.1.11",
+    "axios": "^1.6.0",
+    "dotenv": "^16.3.1",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.8.0",
+    "ts-node": "^10.9.1",
+    "typescript": "^5.2.2"
+  }
+}
