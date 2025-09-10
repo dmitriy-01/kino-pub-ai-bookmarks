@@ -25,72 +25,65 @@ async function scanWatchedContent(): Promise<void> {
 
     // Scan TV shows/serials
     console.log('📡 Fetching watching serials from kino.pub...');
-    const serialsResponse = await client.getWatchingSerials();
+    const serials = await client.getAllWatchingSerials();
+    console.log(`📺 Found ${serials.length} serials in watching list`);
     
-    if (serialsResponse.data && Array.isArray(serialsResponse.data)) {
-      const serials = serialsResponse.data;
-      console.log(`📺 Found ${serials.length} serials in watching list`);
+    for (const serial of serials) {
+      const total = typeof serial.total === 'string' ? parseInt(serial.total, 10) : serial.total;
+      const watched = serial.watched;
       
-      for (const serial of serials) {
-        const total = typeof serial.total === 'string' ? parseInt(serial.total, 10) : serial.total;
-        const watched = serial.watched;
-        
-        // Consider a show fully watched if watched episodes >= total episodes
-        const isFullyWatched = watched >= total && total > 0;
-        
-        const watchedItem: Omit<WatchedItem, 'id'> = {
-          kinoPubId: serial.id,
-          title: serial.title,
-          type: 'serial',
-          year: extractYearFromTitle(serial.title),
-          totalEpisodes: total,
-          watchedEpisodes: watched,
-          fullyWatched: isFullyWatched,
-          poster: serial.posters?.medium || serial.posters?.small,
-          watchedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        };
-        
-        await db.addWatchedItem(watchedItem);
-        totalProcessed++;
-        
-        if (isFullyWatched) {
-          totalFullyWatched++;
-        }
+      // Consider a show fully watched if watched episodes >= total episodes
+      const isFullyWatched = watched >= total && total > 0;
+      
+      const watchedItem: Omit<WatchedItem, 'id'> = {
+        kinoPubId: serial.id,
+        title: serial.title,
+        type: 'serial',
+        year: extractYearFromTitle(serial.title),
+        totalEpisodes: total,
+        watchedEpisodes: watched,
+        fullyWatched: isFullyWatched,
+        poster: serial.posters?.medium || serial.posters?.small,
+        watchedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      
+      await db.addWatchedItem(watchedItem);
+      totalProcessed++;
+      
+      if (isFullyWatched) {
+        totalFullyWatched++;
       }
     }
 
     // Scan movies from watching list (if available)
     console.log('📡 Fetching watching movies from kino.pub...');
     try {
-      const moviesResponse = await client.getWatching();
+      const allWatchingItems = await client.getAllWatchingItems();
+      const movies = allWatchingItems.filter((watchingItem: any) => 
+        watchingItem.item.type === 'movie' || watchingItem.item.type === 'documovie'
+      );
       
-      if (moviesResponse.data && Array.isArray(moviesResponse.data)) {
-        const movies = moviesResponse.data.filter(watchingItem => 
-          watchingItem.item.type === 'movie' || watchingItem.item.type === 'documovie'
-        );
+      console.log(`🎬 Found ${movies.length} movies in watching list`);
+      
+      for (const watchingItem of movies) {
+        const movie = watchingItem.item;
+        // For movies, we consider them fully watched if they appear in the watching list
+        // (assuming user completed them)
+        const watchedItem: Omit<WatchedItem, 'id'> = {
+          kinoPubId: movie.id,
+          title: movie.title,
+          type: 'movie',
+          year: movie.year || extractYearFromTitle(movie.title),
+          fullyWatched: true, // Assume movies in watching list are completed
+          poster: movie.poster,
+          watchedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString()
+        };
         
-        console.log(`🎬 Found ${movies.length} movies in watching list`);
-        
-        for (const watchingItem of movies) {
-          const movie = watchingItem.item;
-          // For movies, we consider them fully watched if they appear in the watching list
-          // (assuming user completed them)
-          const watchedItem: Omit<WatchedItem, 'id'> = {
-            kinoPubId: movie.id,
-            title: movie.title,
-            type: 'movie',
-            year: movie.year || extractYearFromTitle(movie.title),
-            fullyWatched: true, // Assume movies in watching list are completed
-            poster: movie.poster,
-            watchedAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString()
-          };
-          
-          await db.addWatchedItem(watchedItem);
-          totalProcessed++;
-          totalFullyWatched++;
-        }
+        await db.addWatchedItem(watchedItem);
+        totalProcessed++;
+        totalFullyWatched++;
       }
     } catch (error) {
       console.log('⚠️  Could not fetch movies from watching list (this is normal for some accounts)');

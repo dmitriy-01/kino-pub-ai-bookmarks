@@ -8,7 +8,6 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "clean": "rm -rf dist",
-
     "scan-watched": "ts-node src/scripts/scan-watched.ts",
     "scan-bookmarks": "ts-node src/scripts/scan-bookmarks.ts",
     "scan-all-bookmarks": "ts-node src/scripts/scan-bookmarks.ts --all",
@@ -17,7 +16,8 @@
     "rate-content": "ts-node src/scripts/rate-content.ts",
     "ai-recommend": "ts-node src/scripts/ai-recommend.ts",
     "ai-recommend-movies": "ts-node src/scripts/ai-recommend.ts --movies",
-    "ai-recommend-shows": "ts-node src/scripts/ai-recommend.ts --shows"
+    "ai-recommend-shows": "ts-node src/scripts/ai-recommend.ts --shows",
+    "clean-bookmarks": "ts-node src/scripts/clean-bookmarks.ts"
   },
   "keywords": [
     "kino.pub",

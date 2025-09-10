@@ -64,13 +64,51 @@ export class AnthropicClient {
     const dislikedItems = watchedItems.filter(item =>
       item.userRating && item.userRating < 6
     );
+    
+    // Separate unrated items by watch progress confidence
     const unratedItems = watchedItems.filter(item => !item.userRating);
+    
+    const getWatchProgress = (item: WatchedItem) => {
+      if (item.fullyWatched) return 1.0;
+      if (item.type === 'movie') return 1.0; // Movies in watching list are likely completed
+      if (item.totalEpisodes && item.watchedEpisodes) {
+        return item.watchedEpisodes / item.totalEpisodes;
+      }
+      return 0;
+    };
 
-    const formatItem = (item: WatchedItem) => {
+    const highConfidenceItems = unratedItems.filter(item => {
+      const progress = getWatchProgress(item);
+      return progress >= 0.9; // 90%+ watched
+    });
+
+    const goodConfidenceItems = unratedItems.filter(item => {
+      const progress = getWatchProgress(item);
+      return progress >= 0.75 && progress < 0.9; // 75-89% watched
+    });
+
+    const mediumConfidenceItems = unratedItems.filter(item => {
+      const progress = getWatchProgress(item);
+      return progress >= 0.5 && progress < 0.75; // 50-74% watched
+    });
+
+    const lowConfidenceItems = unratedItems.filter(item => {
+      const progress = getWatchProgress(item);
+      return progress >= 0.25 && progress < 0.5; // 25-49% watched
+    });
+
+    const formatItem = (item: WatchedItem, includeProgress: boolean = false) => {
       const yearStr = item.year ? ` (${item.year})` : '';
       const ratingStr = item.userRating ? ` [Rating: ${item.userRating}/10]` : '';
-      const notesStr = item.userNotes ? ` - ${item.userNotes}` : '';
-      return `${item.title}${yearStr}${ratingStr}${notesStr}`;
+      
+      let progressStr = '';
+      if (includeProgress && !item.fullyWatched) {
+        const progress = getWatchProgress(item);
+        const percentage = Math.round(progress * 100);
+        progressStr = ` [${percentage}% watched]`;
+      }
+      
+      return `${item.title}${yearStr}${ratingStr}${progressStr}`;
     };
 
     const bookmarkedTitles = bookmarkedItems.map(item => {
@@ -84,19 +122,31 @@ export class AnthropicClient {
     let prompt = `Based on my viewing history and preferences, please recommend ${contentTypeText} I would enjoy.\n\n`;
 
     if (lovedItems.length > 0) {
-      prompt += `CONTENT I LOVED (8-10/10):\n${lovedItems.map(formatItem).join('\n')}\n\n`;
+      prompt += `CONTENT I LOVED (8-10/10):\n${lovedItems.map(item => formatItem(item)).join('\n')}\n\n`;
     }
 
     if (likedItems.length > 0) {
-      prompt += `CONTENT I LIKED (6-7/10):\n${likedItems.map(formatItem).join('\n')}\n\n`;
+      prompt += `CONTENT I LIKED (6-7/10):\n${likedItems.map(item => formatItem(item)).join('\n')}\n\n`;
     }
 
     if (dislikedItems.length > 0) {
-      prompt += `CONTENT I DISLIKED (1-5/10) - AVOID SIMILAR:\n${dislikedItems.map(formatItem).join('\n')}\n\n`;
+      prompt += `CONTENT I DISLIKED (1-5/10) - AVOID SIMILAR:\n${dislikedItems.map(item => formatItem(item)).join('\n')}\n\n`;
     }
 
-    if (unratedItems.length > 0) {
-      prompt += `OTHER WATCHED CONTENT - DO NOT RECOMMEND THESE:\n${unratedItems.map(formatItem).join('\n')}\n\n`;
+    if (highConfidenceItems.length > 0) {
+      prompt += `HIGHLY WATCHED CONTENT (90-100% completed) - Strong preference indicators:\n${highConfidenceItems.map(item => formatItem(item, true)).join('\n')}\n\n`;
+    }
+
+    if (goodConfidenceItems.length > 0) {
+      prompt += `WELL WATCHED CONTENT (75-89% completed) - Good preference indicators:\n${goodConfidenceItems.map(item => formatItem(item, true)).join('\n')}\n\n`;
+    }
+
+    if (mediumConfidenceItems.length > 0) {
+      prompt += `MODERATELY WATCHED CONTENT (50-74% completed) - Moderate preference indicators:\n${mediumConfidenceItems.map(item => formatItem(item, true)).join('\n')}\n\n`;
+    }
+
+    if (lowConfidenceItems.length > 0) {
+      prompt += `PARTIALLY WATCHED CONTENT (25-49% completed) - Weak preference indicators:\n${lowConfidenceItems.map(item => formatItem(item, true)).join('\n')}\n\n`;
     }
 
     if (bookmarkedTitles.length > 0) {
@@ -116,15 +166,23 @@ export class AnthropicClient {
     }
 
     prompt += `Please recommend 8-12 ${contentTypeText} that I would likely enjoy based on my preferences. Consider:
-1. My ratings and notes to understand what I like/dislike
+1. My ratings to understand what I like/dislike
 2. Patterns in genres, themes, and styles I enjoy
-3. Avoid content similar to what I disliked
-4. NEVER recommend anything from the EXCLUSION LIST above
-5. Include both popular and hidden gems
-6. Mix of recent releases and classics
-7. Focus on internationally popular content that would be available on streaming platforms
+3. Weight preferences by watch completion percentage:
+   - Highly watched content (90-100%) = strongest preference indicators
+   - Well watched content (75-89%) = strong preference indicators  
+   - Moderately watched content (50-74%) = moderate preference indicators
+   - Partially watched content (25-49%) = weak preference indicators
+4. Avoid content similar to what I disliked
+5. NEVER recommend anything from the EXCLUSION LIST above
+6. Include both popular and hidden gems
+7. Mix of recent releases and classics
+8. Focus on internationally popular content that would be available on streaming platforms
 
-IMPORTANT: Provide titles in English only for consistency with search.
+IMPORTANT RESTRICTIONS:
+- DO NOT recommend any anime, animated series, or Japanese animation content
+- Focus on live-action content only
+- Provide titles in English only for consistency with search
 
 Format your response as a simple list, one per line:
 Title (Year)

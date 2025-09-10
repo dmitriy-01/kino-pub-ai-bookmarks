@@ -4,7 +4,7 @@ import { DatabaseService, WatchedItem } from '../services/database';
 import * as readline from 'readline';
 
 /**
- * Interactive script to rate and add notes to watched content
+ * Interactive script to rate watched content
  */
 async function rateContent(): Promise<void> {
   console.log('⭐ Content Rating Tool');
@@ -17,10 +17,10 @@ async function rateContent(): Promise<void> {
   });
   
   try {
-    // Get unrated content first, then rated content
-    const unratedItems = await db.getWatchedItems(undefined, true);
-    const unrated = unratedItems.filter(item => !item.userRating);
-    const rated = unratedItems.filter(item => item.userRating);
+    // Get all watched content (including partially watched)
+    const allWatchedItems = await db.getWatchedItems();
+    const unrated = allWatchedItems.filter(item => !item.userRating);
+    const rated = allWatchedItems.filter(item => item.userRating);
     
     console.log(`📊 Found ${unrated.length} unrated items and ${rated.length} rated items\n`);
     
@@ -103,15 +103,10 @@ async function rateItems(rl: readline.Interface, db: DatabaseService, items: Wat
       continue;
     }
     
-    // Ask for notes
-    const notes = await askQuestion(rl, 'Notes (optional): ');
-    const cleanNotes = notes.trim() || undefined;
+    // Save to database (no notes)
+    await db.updateWatchedItemPreferences(item.kinoPubId, rating, undefined);
     
-    // Save to database
-    await db.updateWatchedItemPreferences(item.kinoPubId, rating, cleanNotes);
-    
-    const notesStr = cleanNotes ? ` - "${cleanNotes}"` : '';
-    console.log(`✅ Rated ${rating}/10${notesStr}`);
+    console.log(`✅ Rated ${rating}/10`);
   }
 }
 
@@ -126,8 +121,7 @@ async function updateRatings(rl: readline.Interface, db: DatabaseService, items:
   items.forEach((item, index) => {
     const typeIcon = item.type === 'movie' ? '🎬' : '📺';
     const yearStr = item.year ? ` (${item.year})` : '';
-    const notesStr = item.userNotes ? ` - "${item.userNotes}"` : '';
-    console.log(`${index + 1}. ${typeIcon} ${item.title}${yearStr} [${item.userRating}/10]${notesStr}`);
+    console.log(`${index + 1}. ${typeIcon} ${item.title}${yearStr} [${item.userRating}/10]`);
   });
   
   const indexStr = await askQuestion(rl, '\nEnter item number to update (or "q" to quit): ');
@@ -148,7 +142,6 @@ async function updateRatings(rl: readline.Interface, db: DatabaseService, items:
   
   console.log(`\nUpdating: ${typeIcon} ${item.title}${yearStr}`);
   console.log(`Current rating: ${item.userRating}/10`);
-  console.log(`Current notes: ${item.userNotes || 'None'}`);
   
   // Ask for new rating
   const ratingStr = await askQuestion(rl, 'New rating 1-10 (or Enter to keep current): ');
@@ -163,19 +156,10 @@ async function updateRatings(rl: readline.Interface, db: DatabaseService, items:
     }
   }
   
-  // Ask for new notes
-  const notesStr = await askQuestion(rl, 'New notes (or Enter to keep current): ');
-  let newNotes = item.userNotes;
+  // Save to database (no notes)
+  await db.updateWatchedItemPreferences(item.kinoPubId, newRating, undefined);
   
-  if (notesStr.trim()) {
-    newNotes = notesStr.trim();
-  }
-  
-  // Save to database
-  await db.updateWatchedItemPreferences(item.kinoPubId, newRating, newNotes);
-  
-  const notesDisplay = newNotes ? ` - "${newNotes}"` : '';
-  console.log(`✅ Updated to ${newRating}/10${notesDisplay}`);
+  console.log(`✅ Updated to ${newRating}/10`);
 }
 
 /**
@@ -184,7 +168,7 @@ async function updateRatings(rl: readline.Interface, db: DatabaseService, items:
 async function viewRatings(db: DatabaseService): Promise<void> {
   console.log('\n📊 All Ratings:\n');
   
-  const items = await db.getWatchedItemsForAI();
+  const items = await db.getWatchedItems();
   
   if (items.length === 0) {
     console.log('📋 No rated content found.');
@@ -213,8 +197,7 @@ async function viewRatings(db: DatabaseService): Promise<void> {
       byRating[rating].forEach(item => {
         const typeIcon = item.type === 'movie' ? '🎬' : '📺';
         const yearStr = item.year ? ` (${item.year})` : '';
-        const notesStr = item.userNotes ? ` - "${item.userNotes}"` : '';
-        console.log(`  ${typeIcon} ${item.title}${yearStr}${notesStr}`);
+        console.log(`  ${typeIcon} ${item.title}${yearStr}`);
       });
       console.log();
     }

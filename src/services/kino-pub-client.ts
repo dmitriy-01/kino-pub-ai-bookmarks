@@ -43,10 +43,10 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
 
   /**
    * Get watching serials with detailed progress information
-   * Only returns serials that the user is subscribed to (subscribed=1)
+   * Returns all serials in the watching list
    */
   public async getWatchingSerials(): Promise<KinoPubApiResponse<KinoPubWatchingSerial[]>> {
-    const response = await this.makeAuthenticatedRequest<any>('/watching/serials?subscribed=1');
+    const response = await this.makeAuthenticatedRequest<any>('/watching/serials');
     
     // The API returns data in 'items' field for this endpoint
     if ((response as any).items) {
@@ -292,6 +292,94 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
    */
   public async getItemById(id: number): Promise<KinoPubApiResponse<KinoPubMediaItem>> {
     return this.makeAuthenticatedRequest<KinoPubMediaItem>(`/items/${id}`);
+  }
+
+  /**
+   * Check if item is watched and get watching status
+   */
+  public async getWatchingStatus(itemId: number): Promise<KinoPubApiResponse<any>> {
+    return this.makeAuthenticatedRequest<any>(`/watching?id=${itemId}`);
+  }
+
+  /**
+   * Check if item is watched (helper method)
+   * Returns true if item has been watched (fully or partially)
+   */
+  public async isItemWatched(itemId: number): Promise<{ isWatched: boolean; isFullyWatched: boolean; watchProgress?: any }> {
+    try {
+      const response = await this.getWatchingStatus(itemId);
+      const item = response.item;
+      
+      if (!item) {
+        return { isWatched: false, isFullyWatched: false };
+      }
+
+      let isWatched = false;
+      let isFullyWatched = false;
+      let totalEpisodes = 0;
+      let watchedEpisodes = 0;
+
+      // Check for serials (seasons/episodes)
+      if (item.seasons && Array.isArray(item.seasons)) {
+        for (const season of item.seasons) {
+          if (season.episodes && Array.isArray(season.episodes)) {
+            for (const episode of season.episodes) {
+              totalEpisodes++;
+              if (episode.status === 1) { // Fully watched
+                watchedEpisodes++;
+                isWatched = true;
+              } else if (episode.status === 0) { // Started watching
+                isWatched = true;
+              }
+            }
+          }
+        }
+        isFullyWatched = totalEpisodes > 0 && watchedEpisodes === totalEpisodes;
+      }
+      
+      // Check for movies/videos
+      if (item.videos && Array.isArray(item.videos)) {
+        for (const video of item.videos) {
+          totalEpisodes++;
+          if (video.status === 1) { // Fully watched
+            watchedEpisodes++;
+            isWatched = true;
+          } else if (video.status === 0) { // Started watching
+            isWatched = true;
+          }
+        }
+        isFullyWatched = totalEpisodes > 0 && watchedEpisodes === totalEpisodes;
+      }
+
+      return {
+        isWatched,
+        isFullyWatched,
+        watchProgress: {
+          totalEpisodes,
+          watchedEpisodes,
+          type: item.type
+        }
+      };
+    } catch (error) {
+      // If API call fails, assume not watched
+      return { isWatched: false, isFullyWatched: false };
+    }
+  }
+
+  /**
+   * Get all watching serials (API has hard limit, no pagination available)
+   */
+  public async getAllWatchingSerials(): Promise<KinoPubWatchingSerial[]> {
+    const response = await this.getWatchingSerials();
+    return response.data || [];
+  }
+
+  /**
+   * Get all watching items (API has hard limit, no pagination available)
+   */
+  public async getAllWatchingItems(): Promise<KinoPubWatchingItem[]> {
+    const response = await this.getWatching();
+    return response.data || [];
   }
 
   /**

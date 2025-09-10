@@ -2,7 +2,7 @@
 
 import { KinoPubClient } from '../services/kino-pub-client';
 import { AnthropicClient } from '../services/anthropic-client';
-import { DatabaseService, RecommendationItem } from '../services/database';
+import { DatabaseService, RecommendationItem, WatchedItem } from '../services/database';
 
 /**
  * Generate AI recommendations and add them to bookmarks
@@ -20,29 +20,75 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
   }
 
   try {
-    // Load watched content from database
+    // Load watched content from database (prioritize fully watched, but include rated items)
     console.log('📖 Loading watched content from database...');
     let watchedItems = await db.getWatchedItemsForAI();
     console.log(`📚 Loaded ${watchedItems.length} fully watched items`);
-
-    // If no fully watched items, try to use partially watched content with significant progress
+    
+    // If we have no fully watched items, also check for rated items (even if partially watched)
     if (watchedItems.length === 0) {
-      console.log('📖 No fully watched content found. Checking partially watched content...');
+      const allWatchedItems = await db.getWatchedItems();
+      const ratedItems = allWatchedItems.filter(item => item.userRating);
+      if (ratedItems.length > 0) {
+        console.log(`📚 Found ${ratedItems.length} rated items to include in analysis`);
+        watchedItems = ratedItems;
+      }
+    }
+
+    // If no fully watched items, try to use partially watched content with different confidence levels
+    if (watchedItems.length === 0) {
+      console.log('📖 No fully watched content found. Analyzing partially watched content...');
       const partiallyWatched = await db.getWatchedItems();
       
-      // Consider items with >50% progress as "watched enough" for recommendations
-      const significantProgress = partiallyWatched.filter(item => {
-        if (item.type === 'movie') return true; // Movies in watching list are likely completed
+      // Categorize items by watch progress confidence levels
+      const getWatchProgress = (item: WatchedItem) => {
+        if (item.type === 'movie') return 1.0; // Movies in watching list are likely completed
         if (item.totalEpisodes && item.watchedEpisodes) {
-          const progress = item.watchedEpisodes / item.totalEpisodes;
-          return progress > 0.5; // More than 50% watched
+          return item.watchedEpisodes / item.totalEpisodes;
         }
-        return false;
+        return 0;
+      };
+
+      const highConfidence = partiallyWatched.filter(item => {
+        const progress = getWatchProgress(item);
+        return progress >= 0.9; // 90%+ watched - very high confidence
       });
-      
-      if (significantProgress.length > 0) {
-        console.log(`📺 Found ${significantProgress.length} items with significant progress (>50% watched)`);
-        watchedItems = significantProgress;
+
+      const goodConfidence = partiallyWatched.filter(item => {
+        const progress = getWatchProgress(item);
+        return progress >= 0.75 && progress < 0.9; // 75-89% watched - good confidence
+      });
+
+      const mediumConfidence = partiallyWatched.filter(item => {
+        const progress = getWatchProgress(item);
+        return progress >= 0.5 && progress < 0.75; // 50-74% watched - medium confidence
+      });
+
+      const lowConfidence = partiallyWatched.filter(item => {
+        const progress = getWatchProgress(item);
+        return progress >= 0.25 && progress < 0.5; // 25-49% watched - low confidence
+      });
+
+      console.log(`📊 Watch progress analysis:`);
+      console.log(`  🟢 High confidence (90-100%): ${highConfidence.length} items`);
+      console.log(`  🟡 Good confidence (75-89%): ${goodConfidence.length} items`);
+      console.log(`  🟠 Medium confidence (50-74%): ${mediumConfidence.length} items`);
+      console.log(`  🔴 Low confidence (25-49%): ${lowConfidence.length} items`);
+
+      // Use items in order of confidence, prioritizing higher confidence levels
+      if (highConfidence.length > 0) {
+        watchedItems = [...highConfidence, ...goodConfidence, ...mediumConfidence];
+        console.log(`📺 Using ${watchedItems.length} items with 50%+ progress (prioritizing high confidence)`);
+      } else if (goodConfidence.length > 0) {
+        watchedItems = [...goodConfidence, ...mediumConfidence];
+        console.log(`📺 Using ${watchedItems.length} items with 50%+ progress`);
+      } else if (mediumConfidence.length > 0) {
+        watchedItems = mediumConfidence;
+        console.log(`📺 Using ${watchedItems.length} items with 50%+ progress`);
+      } else if (lowConfidence.length > 0) {
+        watchedItems = lowConfidence;
+        console.log(`📺 Using ${watchedItems.length} items with 25%+ progress (lower confidence)`);
+        console.log('⚠️  Recommendations may be less accurate due to limited watch progress');
       } else {
         console.log('⚠️  No watched content with significant progress found.');
         console.log('💡 Tip: Watch some shows to completion or use "npm run rate-content" to add preferences');
@@ -65,6 +111,11 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     const bookmarkedItems = await db.getBookmarkedItems();
     console.log(`🔖 Loaded ${bookmarkedItems.length} existing bookmarks`);
 
+    // Load ALL watched items (including partially watched) to exclude from recommendations
+    console.log('📖 Loading all watched items to exclude from recommendations...');
+    const allWatchedItems = await db.getWatchedItems();
+    console.log(`📚 Loaded ${allWatchedItems.length} total watched items (including partial)`);
+
     // Generate AI recommendations
     console.log('🧠 Generating AI recommendations...');
     const anthropicClient = new AnthropicClient();
@@ -76,30 +127,30 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     );
     console.log(`💡 Generated ${rawRecommendations.length} raw recommendations`);
 
-    // Filter out any recommendations that match already watched or bookmarked content
-    const watchedTitles = watchedItems.map(item => item.title.toLowerCase());
+    // Filter out any recommendations that match already watched (including partial) or bookmarked content
+    const allWatchedTitles = allWatchedItems.map(item => item.title.toLowerCase());
     const bookmarkedTitles = bookmarkedItems.map(item => item.title.toLowerCase());
-    const allExcludedTitles = [...watchedTitles, ...bookmarkedTitles];
-    
+    const allExcludedTitles = [...allWatchedTitles, ...bookmarkedTitles];
+
     const recommendations = rawRecommendations.filter(rec => {
       const recTitle = parseRecommendation(rec).title.toLowerCase();
-      
+
       // Check if recommendation matches any excluded title (partial match)
       const isExcluded = allExcludedTitles.some(excluded => {
         const excludedClean = excluded.split('/')[0].trim().toLowerCase(); // Take first part before /
         const recClean = recTitle.trim().toLowerCase();
-        
+
         return excludedClean.includes(recClean) || recClean.includes(excludedClean);
       });
-      
+
       if (isExcluded) {
         console.log(`🚫 Filtered out: ${rec} (matches watched/bookmarked content)`);
         return false;
       }
-      
+
       return true;
     });
-    
+
     console.log(`✅ Filtered to ${recommendations.length} unique recommendations`);
 
     if (recommendations.length === 0) {
@@ -138,7 +189,7 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     // Find or create AI recommendations bookmark folder based on content type
     console.log('\n📁 Setting up AI recommendations bookmark folder...');
     let folderName: string;
-    
+
     if (contentType === 'movie') {
       folderName = 'movies-ai';
     } else if (contentType === 'serial') {
@@ -147,11 +198,11 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
       // For 'both', we'll need to determine per item, but default to tv-shows-ai
       folderName = 'tv-shows-ai';
     }
-    
+
     const folder = await client.findOrCreateBookmarkFolder(folderName);
     console.log(`📁 Using folder: "${folderName}" (ID: ${folder.id})`);
 
-    // Clean up already watched/rated content from AI bookmark folders
+    // Clean up already watched content from AI bookmark folders (including partially watched)
     await cleanupWatchedFromAIFolders(client, db, contentType);
 
     // Search for each recommendation on kino.pub and add to bookmarks
@@ -166,13 +217,13 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
 
         // Try searching with different title variations
         let searchResults = null;
-        
+
         for (const searchTitle of searchTitles) {
           console.log(`  🔍 Trying: "${searchTitle}"`);
-          
+
           // Try both movie and serial types
           const typesToTry = contentType === 'both' ? ['serial', 'movie'] : [contentType];
-          
+
           for (const typeToTry of typesToTry) {
             try {
               console.log(`    🎬 Searching as ${typeToTry}...`);
@@ -184,11 +235,11 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             } catch (error) {
               console.log(`    ❌ Search failed for "${searchTitle}" as ${typeToTry}`);
             }
-            
+
             // Small delay between searches
             await new Promise(resolve => setTimeout(resolve, 200));
           }
-          
+
           if (searchResults && searchResults.data && searchResults.data.length > 0) {
             break; // Found results, stop trying different titles
           }
@@ -212,10 +263,55 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             }
           }
 
+          // Check if item is anime (genre 25) and skip if so
+          const genres = (bestMatch as any).genres || [];
+          const isAnime = genres.some((genre: any) => genre.id === 25 || genre === 25);
+          if (isAnime) {
+            console.log(`🚫 "${bestMatch.title}" is anime - skipping (anime excluded from recommendations)`);
+            continue;
+          }
+
+          // Check if item is subscribed (from search results)
+          const isSubscribed = (bestMatch as any).subscribed === true;
+          if (isSubscribed) {
+            console.log(`📺 "${bestMatch.title}" is subscribed - adding to database`);
+            
+            // Add to watched items database as subscribed (partially watched)
+            const watchedItem: Omit<WatchedItem, 'id'> = {
+              kinoPubId: bestMatch.id,
+              title: bestMatch.title,
+              type: bestMatch.type === 'movie' ? 'movie' : 'serial',
+              year: bestMatch.year,
+              fullyWatched: false, // Subscribed doesn't mean fully watched
+              poster: bestMatch.poster,
+              watchedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            
+            await db.addWatchedItem(watchedItem);
+            console.log(`✅ Added subscribed item "${bestMatch.title}" to watched database`);
+            
+            // Update recommendation status
+            const pendingRecs = await db.getRecommendations('pending');
+            const matchingRec = pendingRecs.find(rec =>
+              rec.title.toLowerCase().includes(title.toLowerCase()) ||
+              title.toLowerCase().includes(rec.title.toLowerCase())
+            );
+
+            if (matchingRec) {
+              await db.updateRecommendationStatus(matchingRec.id, 'rejected', bestMatch.id);
+            }
+
+            addedCount++;
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 500));
+            continue; // Skip to next recommendation
+          }
+
           // Determine the correct folder based on the actual content type
           let targetFolder = folder;
           let targetFolderName = folderName;
-          
+
           if (contentType === 'both') {
             // Determine folder based on the found item's type
             if (bestMatch.type === 'movie' || (bestMatch as any).subtype === 'movie') {
@@ -223,37 +319,82 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             } else {
               targetFolderName = 'tv-shows-ai';
             }
-            
+
             // Get or create the appropriate folder if different from current
             if (targetFolderName !== folderName) {
               targetFolder = await client.findOrCreateBookmarkFolder(targetFolderName);
               console.log(`  📁 Using "${targetFolderName}" folder for ${bestMatch.type}`);
             }
           }
-          
-          // Check if it's already bookmarked in the target folder
+
+          // Check if it's already bookmarked in ANY folder or already watched
           const alreadyBookmarked = bookmarkedItems.some(bookmark =>
-            bookmark.kinoPubId === bestMatch.id && bookmark.folderId === targetFolder.id
+            bookmark.kinoPubId === bestMatch.id
+          );
+
+          const alreadyWatched = allWatchedItems.some(watched =>
+            watched.kinoPubId === bestMatch.id
           );
 
           if (alreadyBookmarked) {
-            console.log(`⏭️  ${bestMatch.title} is already bookmarked in ${targetFolderName}, skipping`);
+            console.log(`⏭️  ${bestMatch.title} is already bookmarked, skipping`);
             continue;
           }
 
-          // Add to appropriate bookmark folder
-          await client.addToBookmarkFolder(targetFolder.id, bestMatch.id);
-          console.log(`✅ Added "${bestMatch.title}" to ${targetFolderName}`);
+          if (alreadyWatched) {
+            console.log(`⏭️  ${bestMatch.title} is already watched, skipping`);
+            continue;
+          }
 
-          // Update recommendation status in database
-          const pendingRecs = await db.getRecommendations('pending');
-          const matchingRec = pendingRecs.find(rec =>
-            rec.title.toLowerCase().includes(title.toLowerCase()) ||
-            title.toLowerCase().includes(rec.title.toLowerCase())
-          );
+          // Check current watching status via API
+          console.log(`🔍 Checking watching status for "${bestMatch.title}"...`);
+          const watchStatus = await client.isItemWatched(bestMatch.id);
+          
+          if (watchStatus.isWatched) {
+            console.log(`📺 "${bestMatch.title}" is being watched - adding to database instead of bookmarks`);
+            
+            // Add to watched items database
+            const watchedItem: Omit<WatchedItem, 'id'> = {
+              kinoPubId: bestMatch.id,
+              title: bestMatch.title,
+              type: bestMatch.type === 'movie' ? 'movie' : 'serial',
+              year: bestMatch.year,
+              totalEpisodes: watchStatus.watchProgress?.totalEpisodes,
+              watchedEpisodes: watchStatus.watchProgress?.watchedEpisodes,
+              fullyWatched: watchStatus.isFullyWatched,
+              poster: bestMatch.poster,
+              watchedAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString()
+            };
+            
+            await db.addWatchedItem(watchedItem);
+            console.log(`✅ Added "${bestMatch.title}" to watched items database (${watchedItem.watchedEpisodes}/${watchedItem.totalEpisodes} episodes)`);
+            
+            // Update recommendation status
+            const pendingRecs = await db.getRecommendations('pending');
+            const matchingRec = pendingRecs.find(rec =>
+              rec.title.toLowerCase().includes(title.toLowerCase()) ||
+              title.toLowerCase().includes(rec.title.toLowerCase())
+            );
 
-          if (matchingRec) {
-            await db.updateRecommendationStatus(matchingRec.id, 'bookmarked', bestMatch.id);
+            if (matchingRec) {
+              await db.updateRecommendationStatus(matchingRec.id, 'rejected', bestMatch.id);
+            }
+          } else {
+            // Item is not watched, add to bookmark folder
+            await client.addToBookmarkFolder(targetFolder.id, bestMatch.id);
+            console.log(`✅ Added "${bestMatch.title}" to ${targetFolderName}`);
+
+            // Update recommendation status in database
+            const pendingRecs = await db.getRecommendations('pending');
+            const matchingRec = pendingRecs.find(rec =>
+              rec.title.toLowerCase().includes(title.toLowerCase()) ||
+              title.toLowerCase().includes(rec.title.toLowerCase())
+            );
+
+            if (matchingRec) {
+              await db.updateRecommendationStatus(matchingRec.id, 'bookmarked', bestMatch.id);
+            }
           }
 
           addedCount++;
@@ -271,7 +412,7 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     }
 
     console.log(`\n🎉 Results:`);
-    console.log(`✅ Added ${addedCount} new items to bookmarks`);
+    console.log(`✅ Processed ${addedCount} new items (added to bookmarks or watched database)`);
     console.log(`❌ Could not find ${notFoundCount} items`);
 
     if (addedCount > 0) {
@@ -296,21 +437,21 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
 }
 
 /**
- * Clean up already watched or rated content from AI bookmark folders
+ * Clean up already watched content from AI bookmark folders (including partially watched)
  */
 async function cleanupWatchedFromAIFolders(
-  client: KinoPubClient, 
-  db: DatabaseService, 
+  client: KinoPubClient,
+  db: DatabaseService,
   contentType: 'movie' | 'serial' | 'both'
 ): Promise<void> {
-  console.log('\n🧹 Cleaning up watched/rated content from AI bookmark folders...');
+  console.log('\n🧹 Cleaning up watched content from AI bookmark folders...');
 
   try {
-    // Get all watched items (both fully watched and rated items)
+    // Get all watched items (including partially watched to avoid recommending what's already being watched)
     const watchedItems = await db.getWatchedItems();
     const watchedKinoPubIds = new Set(watchedItems.map(item => item.kinoPubId));
-    
-    console.log(`📚 Found ${watchedItems.length} watched/rated items to check for removal`);
+
+    console.log(`📚 Found ${watchedItems.length} watched items (including partial) to check for removal`);
 
     // Determine which folders to clean based on content type
     const foldersToClean: string[] = [];
@@ -338,7 +479,7 @@ async function cleanupWatchedFromAIFolders(
         // Get current bookmarks in the AI folder
         const folderContent = await client.getBookmarkFolder(aiFolder.id);
         const currentBookmarks = folderContent.data?.items || [];
-        
+
         console.log(`🔖 Found ${currentBookmarks.length} items in "${folderName}" folder`);
 
         let removedFromFolder = 0;
@@ -381,10 +522,10 @@ function parseRecommendation(recommendation: string): { title: string; year?: nu
   const yearMatch = recommendation.match(/\((\d{4})\)$/);
   const year = yearMatch ? parseInt(yearMatch[1], 10) : undefined;
   const title = recommendation.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-  
+
   // Use English title for search
   const searchTitles: string[] = [title];
-  
+
   return { title, year, searchTitles };
 }
 
