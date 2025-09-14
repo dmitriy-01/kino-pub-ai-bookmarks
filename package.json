@@ -17,7 +17,12 @@
     "ai-recommend": "ts-node src/scripts/ai-recommend.ts",
     "ai-recommend-movies": "ts-node src/scripts/ai-recommend.ts --movies",
     "ai-recommend-shows": "ts-node src/scripts/ai-recommend.ts --shows",
-    "clean-bookmarks": "ts-node src/scripts/clean-bookmarks.ts"
+    "clean-bookmarks": "ts-node src/scripts/clean-bookmarks.ts",
+    "cleanup-not-interested": "ts-node src/scripts/cleanup-not-interested.ts",
+    "manage-not-interested": "ts-node src/scripts/manage-not-interested.ts",
+    "authenticate": "ts-node src/scripts/authenticate.ts",
+    "auth-status": "ts-node src/scripts/auth-status.ts",
+    "refresh-auth": "ts-node src/scripts/refresh-auth.ts"
   },
   "keywords": [
     "kino.pub",

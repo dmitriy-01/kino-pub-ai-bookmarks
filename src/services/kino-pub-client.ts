@@ -4,10 +4,14 @@ import { getConfig } from '../config';
 import {
   KinoPubApiResponse,
   KinoPubMediaItem,
+  KinoPubBookmarkItem,
   KinoPubWatchingItem,
   KinoPubWatchingSerial,
   KinoPubBookmarkFolder,
   KinoPubBookmarkFolderContent,
+  KinoPubBookmarkFoldersResponse,
+  KinoPubBookmarkFolderResponse,
+  KinoPubBookmarkActionResponse,
   KinoPubApiError,
   KinoPubAuthError,
   KinoPubApiClient
@@ -62,49 +66,90 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
   /**
    * Get user's bookmark folders
    */
-  public async getBookmarkFolders(): Promise<KinoPubApiResponse<KinoPubBookmarkFolder[]>> {
+  public async getBookmarkFolders(): Promise<KinoPubBookmarkFoldersResponse> {
     const response = await this.makeAuthenticatedRequest<any>('/bookmarks');
     
-    // API returns items in 'items' field, not 'data'
-    if (response.items) {
-      return {
-        ...response,
-        data: response.items
-      };
-    }
-    
-    return response;
+    // API returns items in 'items' field
+    return {
+      status: response.status || 200,
+      items: response.items || response.data || []
+    };
   }
 
   /**
    * Get items in a specific bookmark folder
    */
-  public async getBookmarkFolder(folderId: number): Promise<KinoPubApiResponse<KinoPubBookmarkFolderContent>> {
-    return this.makeAuthenticatedRequest<KinoPubBookmarkFolderContent>(`/bookmarks/${folderId}`);
+  public async getBookmarkFolder(folderId: number, page: number = 1): Promise<KinoPubBookmarkFolderResponse> {
+    const params = page > 1 ? `?page=${page}` : '';
+    const response = await this.makeAuthenticatedRequest<any>(`/bookmarks/${folderId}${params}`);
+    
+    // API can return data in different structures
+    if (response.data) {
+      return {
+        status: response.status || 200,
+        data: response.data
+      };
+    } else {
+      // Handle direct response structure
+      return {
+        status: response.status || 200,
+        data: {
+          id: folderId,
+          title: (response as any).title || '',
+          count: (response as any).count || 0,
+          items: (response as any).items || [],
+          pagination: (response as any).pagination
+        }
+      };
+    }
+  }
+
+  /**
+   * Get ALL items in a specific bookmark folder (handles pagination)
+   */
+  public async getAllBookmarkFolderItems(folderId: number): Promise<KinoPubBookmarkItem[]> {
+    const allItems: KinoPubBookmarkItem[] = [];
+    let currentPage = 1;
+    let totalPages = 1;
+
+    do {
+      const folderResponse = await this.getBookmarkFolder(folderId, currentPage);
+      const items = folderResponse.data?.items || [];
+      allItems.push(...items);
+
+      // Check pagination info
+      const pagination = folderResponse.data?.pagination;
+      if (pagination && pagination.total > 1) {
+        totalPages = pagination.total;
+        currentPage++;
+      } else {
+        break; // No more pages
+      }
+    } while (currentPage <= totalPages);
+
+    return allItems;
   }
 
   /**
    * Get all bookmarked items from all folders (convenience method)
    */
-  public async getAllBookmarks(): Promise<KinoPubMediaItem[]> {
+  public async getAllBookmarks(): Promise<KinoPubBookmarkItem[]> {
     try {
       // First get all folders
       const foldersResponse = await this.getBookmarkFolders();
-      const folders = foldersResponse.data || [];
+      const folders = foldersResponse.items || [];
       
       if (folders.length === 0) {
         return [];
       }
       
       // Get items from all folders
-      const allItems: KinoPubMediaItem[] = [];
+      const allItems: KinoPubBookmarkItem[] = [];
       
       for (const folder of folders) {
         try {
-          const folderResponse = await this.getBookmarkFolder(folder.id);
-          if (folderResponse.data?.items) {
-            allItems.push(...folderResponse.data.items);
-          }
+          const items = await this.getAllBookmarkFolderItems(folder.id);
+          allItems.push(...items);
         } catch (error) {
           console.warn(`Failed to get items from folder ${folder.title}:`, error);
         }
@@ -120,25 +165,25 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
   /**
    * Add item to bookmarks folder
    */
-  public async addBookmark(itemId: number, folderId?: number): Promise<KinoPubApiResponse<any>> {
+  public async addBookmark(itemId: number, folderId?: number): Promise<KinoPubBookmarkActionResponse> {
     const data: any = { item: itemId };
     if (folderId) {
       data.folder = folderId;
     }
     
-    return this.makeAuthenticatedRequest<any>('/bookmarks/add', 'POST', data);
+    return this.makeAuthenticatedRequest<KinoPubBookmarkActionResponse>('/bookmarks/add', 'POST', data);
   }
 
   /**
    * Remove item from bookmarks
    */
-  public async removeBookmark(itemId: number, folderId?: number): Promise<KinoPubApiResponse<any>> {
+  public async removeBookmark(itemId: number, folderId?: number): Promise<KinoPubBookmarkActionResponse> {
     const data: any = { item: itemId };
     if (folderId) {
       data.folder = folderId;
     }
     
-    return this.makeAuthenticatedRequest<any>('/bookmarks/remove-item', 'POST', data);
+    return this.makeAuthenticatedRequest<KinoPubBookmarkActionResponse>('/bookmarks/remove-item', 'POST', data);
   }
 
   /**
@@ -146,13 +191,13 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
    * @param item - The item ID to remove
    * @param folder - Optional folder ID to remove from specific folder
    */
-  public async removeBookmarkItem(item: number, folder?: number): Promise<KinoPubApiResponse<any>> {
+  public async removeBookmarkItem(item: number, folder?: number): Promise<KinoPubBookmarkActionResponse> {
     const data: any = { item };
     if (folder !== undefined) {
       data.folder = folder;
     }
     
-    return this.makeAuthenticatedRequest<any>('/bookmarks/remove-item', 'POST', data);
+    return this.makeAuthenticatedRequest<KinoPubBookmarkActionResponse>('/bookmarks/remove-item', 'POST', data);
   }
 
   /**
@@ -162,8 +207,7 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
   public async findBookmarkFolderByName(name: string): Promise<KinoPubBookmarkFolder | null> {
     try {
       const foldersResponse = await this.getBookmarkFolders();
-      // Handle both 'data' and 'items' response structures
-      const folders = foldersResponse.data || (foldersResponse as any).items || [];
+      const folders = foldersResponse.items || [];
       
       const folder = folders.find((f: KinoPubBookmarkFolder) => f.title.toLowerCase() === name.toLowerCase());
       return folder || null;
@@ -178,7 +222,7 @@ export class KinoPubClient implements Partial<KinoPubApiClient> {
    * Returns the created folder information
    */
   public async createBookmarkFolder(name: string): Promise<KinoPubApiResponse<KinoPubBookmarkFolder>> {
-    return this.makeAuthenticatedRequest<KinoPubBookmarkFolder>('/bookmarks/create', 'POST', { title: name });
+    return this.makeAuthenticatedRequest<any>('/bookmarks/create', 'POST', { title: name });
   }
 
   /**

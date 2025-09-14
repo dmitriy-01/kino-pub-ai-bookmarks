@@ -30,20 +30,52 @@ export interface KinoPubApiResponse<T = any> {
   };
 }
 
+// Specific response types for bookmarks API
+export interface KinoPubBookmarkFoldersResponse {
+  status: number;
+  items: KinoPubBookmarkFolder[];
+}
+
+export interface KinoPubBookmarkFolderResponse {
+  status: number;
+  data: KinoPubBookmarkFolderContent;
+}
+
+export interface KinoPubBookmarkActionResponse {
+  status: number;
+  message?: string;
+}
+
 export interface KinoPubMediaItem {
   id: number;
   title: string;
   type: 'movie' | 'documovie' | '3d' | 'serial' | 'docuserial' | 'tvshow';
+  subtype?: string;
   year?: number;
-  genres?: string[];
+  genres?: KinoPubGenre[];
+  countries?: KinoPubCountry[];
   rating?: {
     imdb?: number;
     kinopoisk?: number;
   };
+  imdb_rating?: number; // Direct IMDB rating field
+  kinopoisk_rating?: number; // Direct Kinopoisk rating field
   description?: string;
   actors?: string[];
   directors?: string[];
   poster?: string;
+  posters?: {
+    small?: string;
+    medium?: string;
+    big?: string;
+  };
+  trailer?: string;
+  quality?: string;
+  ac3?: number;
+  director?: string;
+  cast?: string;
+  subscribed?: boolean; // Indicates if user is subscribed to this item
+  in_watchlist?: boolean; // Indicates if item is in watchlist
   videos?: KinoPubVideo[];      // For movies
   seasons?: KinoPubSeason[];    // For TV shows
 }
@@ -118,13 +150,57 @@ export interface KinoPubBookmarkFolderContent {
   id: number;
   title: string;
   count: number;
-  items: KinoPubMediaItem[];
+  items: KinoPubBookmarkItem[];
   pagination?: {
     current: number;
     total: number;
     per_page: number;
     total_items?: number;
   };
+}
+
+export interface KinoPubBookmarkItem {
+  id: number;
+  title: string;
+  type: 'movie' | 'documovie' | '3d' | 'serial' | 'docuserial' | 'tvshow';
+  subtype?: string;
+  year?: number;
+  genres?: KinoPubGenre[];
+  countries?: KinoPubCountry[];
+  rating?: {
+    imdb?: number;
+    kinopoisk?: number;
+  };
+  imdb_rating?: number; // Direct IMDB rating field
+  kinopoisk_rating?: number; // Direct Kinopoisk rating field
+  description?: string;
+  actors?: string[];
+  directors?: string[];
+  poster?: string;
+  posters?: {
+    small?: string;
+    medium?: string;
+    big?: string;
+  };
+  trailer?: string;
+  quality?: string;
+  ac3?: number;
+  director?: string;
+  cast?: string;
+  subscribed?: boolean; // Indicates if user is subscribed to this item
+  in_watchlist?: boolean; // Indicates if item is in watchlist
+  videos?: KinoPubVideo[];      // For movies
+  seasons?: KinoPubSeason[];    // For TV shows
+}
+
+export interface KinoPubGenre {
+  id: number;
+  title: string;
+}
+
+export interface KinoPubCountry {
+  id: number;
+  title: string;
 }
 
 /**

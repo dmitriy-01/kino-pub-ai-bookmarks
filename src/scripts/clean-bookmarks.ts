@@ -52,10 +52,10 @@ async function cleanBookmarks(folderNames?: string[]): Promise<void> {
     // Get all bookmark folders
     console.log('📁 Loading bookmark folders...');
     const foldersResponse = await client.getBookmarkFolders();
-    const allFolders = foldersResponse.data || [];
+    const allFolders = foldersResponse.items || [];
     
     // Find the managed folders that exist
-    const foldersToClean = allFolders.filter(folder => 
+    const foldersToClean = allFolders.filter((folder: any) => 
       targetFolderNames.some(targetName => 
         folder.title.toLowerCase() === targetName.toLowerCase() ||
         folder.title.toLowerCase().includes(targetName.toLowerCase())

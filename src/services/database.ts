@@ -42,6 +42,18 @@ export interface RecommendationItem {
   updatedAt: string; // ISO date string
 }
 
+export interface NotInterestedItem {
+  id: number;
+  kinoPubId: number;
+  title: string;
+  type: 'movie' | 'serial';
+  year?: number;
+  poster?: string;
+  reason?: string; // Optional reason why not interested
+  addedAt: string; // ISO date string
+  updatedAt: string; // ISO date string
+}
+
 export class DatabaseService {
   private db: sqlite3.Database;
   private dbPath: string;
@@ -104,6 +116,20 @@ export class DatabaseService {
       )
     `;
 
+    const createNotInterestedTable = `
+      CREATE TABLE IF NOT EXISTS not_interested_items (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kino_pub_id INTEGER UNIQUE NOT NULL,
+        title TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type IN ('movie', 'serial')),
+        year INTEGER,
+        poster TEXT,
+        reason TEXT,
+        added_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `;
+
     // Create indexes for better performance
     const createIndexes = [
       'CREATE INDEX IF NOT EXISTS idx_watched_kino_pub_id ON watched_items(kino_pub_id)',
@@ -112,13 +138,16 @@ export class DatabaseService {
       'CREATE INDEX IF NOT EXISTS idx_bookmarked_kino_pub_id ON bookmarked_items(kino_pub_id)',
       'CREATE INDEX IF NOT EXISTS idx_bookmarked_folder_id ON bookmarked_items(folder_id)',
       'CREATE INDEX IF NOT EXISTS idx_recommendations_status ON recommendations(status)',
-      'CREATE INDEX IF NOT EXISTS idx_recommendations_source ON recommendations(source)'
+      'CREATE INDEX IF NOT EXISTS idx_recommendations_source ON recommendations(source)',
+      'CREATE INDEX IF NOT EXISTS idx_not_interested_kino_pub_id ON not_interested_items(kino_pub_id)',
+      'CREATE INDEX IF NOT EXISTS idx_not_interested_type ON not_interested_items(type)'
     ];
 
     this.db.serialize(() => {
       this.db.run(createWatchedTable);
       this.db.run(createBookmarkedTable);
       this.db.run(createRecommendationsTable);
+      this.db.run(createNotInterestedTable);
       
       createIndexes.forEach(indexSql => {
         this.db.run(indexSql);
@@ -371,6 +400,114 @@ export class DatabaseService {
   }
 
   /**
+   * Add or update a "not interested" item
+   */
+  async addNotInterestedItem(item: Omit<NotInterestedItem, 'id'>): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const sql = `
+        INSERT OR REPLACE INTO not_interested_items 
+        (kino_pub_id, title, type, year, poster, reason, added_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `;
+      
+      this.db.run(sql, [
+        item.kinoPubId, item.title, item.type, item.year,
+        item.poster, item.reason, item.addedAt, item.updatedAt
+      ], function(err) {
+        if (err) reject(err);
+        else resolve(this.lastID);
+      });
+    });
+  }
+
+  /**
+   * Get all "not interested" items
+   */
+  async getNotInterestedItems(type?: 'movie' | 'serial'): Promise<NotInterestedItem[]> {
+    return new Promise((resolve, reject) => {
+      let sql = 'SELECT * FROM not_interested_items WHERE 1=1';
+      const params: any[] = [];
+
+      if (type) {
+        sql += ' AND type = ?';
+        params.push(type);
+      }
+
+      sql += ' ORDER BY added_at DESC';
+
+      this.db.all(sql, params, (err, rows: any[]) => {
+        if (err) reject(err);
+        else resolve(rows.map(this.mapNotInterestedItemFromDb));
+      });
+    });
+  }
+
+  /**
+   * Remove a "not interested" item
+   */
+  async removeNotInterestedItem(kinoPubId: number): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const sql = 'DELETE FROM not_interested_items WHERE kino_pub_id = ?';
+      
+      this.db.run(sql, [kinoPubId], (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    });
+  }
+
+  /**
+   * Check if an item is in "not interested" list
+   */
+  async isNotInterested(kinoPubId: number): Promise<boolean> {
+    return new Promise((resolve, reject) => {
+      const sql = 'SELECT COUNT(*) as count FROM not_interested_items WHERE kino_pub_id = ?';
+      
+      this.db.get(sql, [kinoPubId], (err, row: any) => {
+        if (err) reject(err);
+        else resolve(row.count > 0);
+      });
+    });
+  }
+
+  /**
+   * Sync "not interested" items from bookmark folders
+   */
+  async syncNotInterestedFromBookmarks(bookmarkedItems: BookmarkedItem[]): Promise<number> {
+    const notInterestedBookmarks = bookmarkedItems.filter(item => 
+      item.folderName.toLowerCase().includes('not interested') || 
+      item.folderName.toLowerCase().includes('not-interested') ||
+      item.folderName.toLowerCase().includes('dislike')
+    );
+
+    let syncedCount = 0;
+    const now = new Date().toISOString();
+
+    for (const bookmark of notInterestedBookmarks) {
+      const notInterestedItem: Omit<NotInterestedItem, 'id'> = {
+        kinoPubId: bookmark.kinoPubId,
+        title: bookmark.title,
+        type: bookmark.type,
+        year: bookmark.year,
+        poster: bookmark.poster,
+        reason: `From "${bookmark.folderName}" folder`,
+        addedAt: bookmark.addedAt,
+        updatedAt: now
+      };
+
+      try {
+        await this.addNotInterestedItem(notInterestedItem);
+        syncedCount++;
+      } catch (error) {
+        // Item might already exist, which is fine
+        console.debug(`Item ${bookmark.title} already in not interested list`);
+      }
+    }
+
+    return syncedCount;
+  }
+
+  /**
    * Map database row to RecommendationItem
    */
   private mapRecommendationFromDb(row: any): RecommendationItem {
@@ -384,6 +521,23 @@ export class DatabaseService {
       kinoPubId: row.kino_pub_id,
       status: row.status,
       createdAt: row.created_at,
+      updatedAt: row.updated_at
+    };
+  }
+
+  /**
+   * Map database row to NotInterestedItem
+   */
+  private mapNotInterestedItemFromDb(row: any): NotInterestedItem {
+    return {
+      id: row.id,
+      kinoPubId: row.kino_pub_id,
+      title: row.title,
+      type: row.type,
+      year: row.year,
+      poster: row.poster,
+      reason: row.reason,
+      addedAt: row.added_at,
       updatedAt: row.updated_at
     };
   }

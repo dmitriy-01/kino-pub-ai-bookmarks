@@ -2,7 +2,7 @@
 
 import { KinoPubClient } from '../services/kino-pub-client';
 import { AnthropicClient } from '../services/anthropic-client';
-import { DatabaseService, RecommendationItem, WatchedItem } from '../services/database';
+import { DatabaseService, RecommendationItem, WatchedItem, NotInterestedItem } from '../services/database';
 
 /**
  * Generate AI recommendations and add them to bookmarks
@@ -108,8 +108,29 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
 
     // Load existing bookmarks from database
     console.log('📖 Loading existing bookmarks from database...');
-    const bookmarkedItems = await db.getBookmarkedItems();
-    console.log(`🔖 Loaded ${bookmarkedItems.length} existing bookmarks`);
+    const allBookmarkedItems = await db.getBookmarkedItems();
+    
+    // Sync "not interested" items from bookmarks to local database
+    console.log('🔄 Syncing "not interested" items to local database...');
+    const syncedCount = await db.syncNotInterestedFromBookmarks(allBookmarkedItems);
+    if (syncedCount > 0) {
+      console.log(`✅ Synced ${syncedCount} new "not interested" items to local database`);
+    }
+    
+    // Load "not interested" items from local database (faster and more reliable)
+    const notInterestedItems = await db.getNotInterestedItems();
+    
+    // Filter out "not interested" items from regular bookmarks
+    const bookmarkedItems = allBookmarkedItems.filter(item => 
+      !item.folderName.toLowerCase().includes('not interested') && 
+      !item.folderName.toLowerCase().includes('not-interested') &&
+      !item.folderName.toLowerCase().includes('dislike')
+    );
+    
+    console.log(`🔖 Loaded ${bookmarkedItems.length} regular bookmarks`);
+    if (notInterestedItems.length > 0) {
+      console.log(`🚫 Found ${notInterestedItems.length} items in "not interested" database - will exclude from recommendations`);
+    }
 
     // Load ALL watched items (including partially watched) to exclude from recommendations
     console.log('📖 Loading all watched items to exclude from recommendations...');
@@ -123,14 +144,16 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     const rawRecommendations = await anthropicClient.generateRecommendations(
       watchedItems,
       bookmarkedItems,
-      contentType
+      contentType,
+      notInterestedItems
     );
     console.log(`💡 Generated ${rawRecommendations.length} raw recommendations`);
 
-    // Filter out any recommendations that match already watched (including partial) or bookmarked content
+    // Filter out any recommendations that match already watched (including partial), bookmarked, or "not interested" content
     const allWatchedTitles = allWatchedItems.map(item => item.title.toLowerCase());
     const bookmarkedTitles = bookmarkedItems.map(item => item.title.toLowerCase());
-    const allExcludedTitles = [...allWatchedTitles, ...bookmarkedTitles];
+    const notInterestedTitles = notInterestedItems.map(item => item.title.toLowerCase());
+    const allExcludedTitles = [...allWatchedTitles, ...bookmarkedTitles, ...notInterestedTitles];
 
     const recommendations = rawRecommendations.filter(rec => {
       const recTitle = parseRecommendation(rec).title.toLowerCase();
@@ -205,10 +228,21 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
     // Clean up already watched content from AI bookmark folders (including partially watched)
     await cleanupWatchedFromAIFolders(client, db, contentType);
 
+    // Clean up "not interested" items from AI bookmark folders
+    await cleanupNotInterestedFromAIFolders(client, db, notInterestedItems, contentType);
+
+    // Get current AI folder contents to avoid duplicates
+    console.log('\n📋 Loading current AI folder contents to avoid duplicates...');
+    // Small delay to ensure any previous operations are reflected
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    const currentAIFolderItems = await getCurrentAIFolderItems(client, contentType);
+    console.log(`🔖 Found ${currentAIFolderItems.length} existing items in AI folders`);
+
     // Search for each recommendation on kino.pub and add to bookmarks
     console.log('\n🔍 Searching for recommendations on kino.pub...');
     let addedCount = 0;
     let notFoundCount = 0;
+    let skippedCount = 0;
 
     for (const recommendation of recommendations) {
       try {
@@ -271,6 +305,24 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             continue;
           }
 
+          // Check IMDB rating filters
+          const imdbRating = (bestMatch as any).imdb_rating || (bestMatch as any).imdb?.rating;
+          if (imdbRating) {
+            const rating = parseFloat(imdbRating);
+            const isMovie = bestMatch.type === 'movie' || (bestMatch as any).subtype === 'movie';
+            const isSerial = bestMatch.type === 'serial' || (bestMatch as any).subtype === 'serial';
+            
+            if (isMovie && rating < 6.0) {
+              console.log(`🚫 "${bestMatch.title}" has IMDB rating ${rating} (movies require ≥6.0) - skipping`);
+              continue;
+            }
+            
+            if (isSerial && rating < 7.0) {
+              console.log(`🚫 "${bestMatch.title}" has IMDB rating ${rating} (TV shows require ≥7.0) - skipping`);
+              continue;
+            }
+          }
+
           // Check if item is subscribed (from search results)
           const isSubscribed = (bestMatch as any).subscribed === true;
           if (isSubscribed) {
@@ -290,6 +342,9 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             
             await db.addWatchedItem(watchedItem);
             console.log(`✅ Added subscribed item "${bestMatch.title}" to watched database`);
+            
+            // Add to local arrays to prevent duplicates in the same run
+            allWatchedItems.push(watchedItem as WatchedItem);
             
             // Update recommendation status
             const pendingRecs = await db.getRecommendations('pending');
@@ -328,21 +383,71 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
           }
 
           // Check if it's already bookmarked in ANY folder or already watched
-          const alreadyBookmarked = bookmarkedItems.some(bookmark =>
-            bookmark.kinoPubId === bestMatch.id
-          );
+          const alreadyBookmarked = bookmarkedItems.some(bookmark => {
+            if (bookmark.kinoPubId === bestMatch.id) {
+              return true;
+            }
+            // Also check by title similarity
+            const bookmarkTitle = bookmark.title.toLowerCase().trim();
+            const bestMatchTitle = bestMatch.title.toLowerCase().trim();
+            const cleanBookmarkTitle = bookmarkTitle.replace(/^[^/]*\/\s*/, '').trim();
+            const cleanBestMatchTitle = bestMatchTitle.replace(/^[^/]*\/\s*/, '').trim();
+            
+            return cleanBookmarkTitle === cleanBestMatchTitle ||
+                   bookmarkTitle.includes(cleanBestMatchTitle) ||
+                   bestMatchTitle.includes(cleanBookmarkTitle);
+          });
 
-          const alreadyWatched = allWatchedItems.some(watched =>
-            watched.kinoPubId === bestMatch.id
-          );
+          const alreadyWatched = allWatchedItems.some(watched => {
+            if (watched.kinoPubId === bestMatch.id) {
+              return true;
+            }
+            // Also check by title similarity
+            const watchedTitle = watched.title.toLowerCase().trim();
+            const bestMatchTitle = bestMatch.title.toLowerCase().trim();
+            const cleanWatchedTitle = watchedTitle.replace(/^[^/]*\/\s*/, '').trim();
+            const cleanBestMatchTitle = bestMatchTitle.replace(/^[^/]*\/\s*/, '').trim();
+            
+            return cleanWatchedTitle === cleanBestMatchTitle ||
+                   watchedTitle.includes(cleanBestMatchTitle) ||
+                   bestMatchTitle.includes(cleanWatchedTitle);
+          });
+
+          // Check if it's already in AI folders (live check)
+          const alreadyInAIFolder = currentAIFolderItems.some(item => {
+            // Check by ID first
+            if (item.id === bestMatch.id) {
+              return true;
+            }
+            
+            // Check by title similarity (in case of different IDs for same content)
+            const itemTitle = item.title.toLowerCase().trim();
+            const bestMatchTitle = bestMatch.title.toLowerCase().trim();
+            
+            // Remove common prefixes/suffixes and compare
+            const cleanItemTitle = itemTitle.replace(/^[^/]*\/\s*/, '').trim();
+            const cleanBestMatchTitle = bestMatchTitle.replace(/^[^/]*\/\s*/, '').trim();
+            
+            return cleanItemTitle === cleanBestMatchTitle || 
+                   itemTitle.includes(cleanBestMatchTitle) || 
+                   bestMatchTitle.includes(cleanItemTitle);
+          });
 
           if (alreadyBookmarked) {
             console.log(`⏭️  ${bestMatch.title} is already bookmarked, skipping`);
+            skippedCount++;
             continue;
           }
 
           if (alreadyWatched) {
             console.log(`⏭️  ${bestMatch.title} is already watched, skipping`);
+            skippedCount++;
+            continue;
+          }
+
+          if (alreadyInAIFolder) {
+            console.log(`⏭️  ${bestMatch.title} is already in AI folders, skipping`);
+            skippedCount++;
             continue;
           }
 
@@ -370,6 +475,9 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             await db.addWatchedItem(watchedItem);
             console.log(`✅ Added "${bestMatch.title}" to watched items database (${watchedItem.watchedEpisodes}/${watchedItem.totalEpisodes} episodes)`);
             
+            // Add to local arrays to prevent duplicates in the same run
+            allWatchedItems.push(watchedItem as WatchedItem);
+            
             // Update recommendation status
             const pendingRecs = await db.getRecommendations('pending');
             const matchingRec = pendingRecs.find(rec =>
@@ -384,6 +492,9 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
             // Item is not watched, add to bookmark folder
             await client.addToBookmarkFolder(targetFolder.id, bestMatch.id);
             console.log(`✅ Added "${bestMatch.title}" to ${targetFolderName}`);
+
+            // Add to currentAIFolderItems to prevent duplicates in the same run
+            currentAIFolderItems.push(bestMatch);
 
             // Update recommendation status in database
             const pendingRecs = await db.getRecommendations('pending');
@@ -413,6 +524,7 @@ async function aiRecommend(contentType: 'movie' | 'serial' | 'both' = 'both'): P
 
     console.log(`\n🎉 Results:`);
     console.log(`✅ Processed ${addedCount} new items (added to bookmarks or watched database)`);
+    console.log(`⏭️  Skipped ${skippedCount} items (already bookmarked, watched, or in AI folders)`);
     console.log(`❌ Could not find ${notFoundCount} items`);
 
     if (addedCount > 0) {
@@ -478,7 +590,8 @@ async function cleanupWatchedFromAIFolders(
 
         // Get current bookmarks in the AI folder
         const folderContent = await client.getBookmarkFolder(aiFolder.id);
-        const currentBookmarks = folderContent.data?.items || [];
+        // Handle different response structures - items can be in data.items or directly in response.items
+        const currentBookmarks = folderContent.data?.items || (folderContent as any).items || [];
 
         console.log(`🔖 Found ${currentBookmarks.length} items in "${folderName}" folder`);
 
@@ -512,6 +625,172 @@ async function cleanupWatchedFromAIFolders(
 
   } catch (error) {
     console.error('❌ Error during AI folder cleanup:', error);
+  }
+}
+
+/**
+ * Get current items in AI folders to avoid duplicates
+ */
+async function getCurrentAIFolderItems(
+  client: KinoPubClient,
+  contentType: 'movie' | 'serial' | 'both'
+): Promise<any[]> {
+  const allItems: any[] = [];
+
+  // Determine which folders to check based on content type
+  const foldersToCheck: string[] = [];
+  if (contentType === 'movie') {
+    foldersToCheck.push('movies-ai');
+  } else if (contentType === 'serial') {
+    foldersToCheck.push('tv-shows-ai');
+  } else {
+    foldersToCheck.push('movies-ai', 'tv-shows-ai');
+  }
+
+  for (const folderName of foldersToCheck) {
+    try {
+      // Find the AI folder
+      const aiFolder = await client.findBookmarkFolderByName(folderName);
+      if (!aiFolder) {
+        console.log(`📁 Folder "${folderName}" not found, skipping`);
+        continue;
+      }
+
+      // Get current bookmarks in the AI folder
+      const folderContent = await client.getBookmarkFolder(aiFolder.id);
+      // Handle different response structures - items can be in data.items or directly in response.items
+      const currentBookmarks = folderContent.data?.items || (folderContent as any).items || [];
+      
+      allItems.push(...currentBookmarks);
+      console.log(`📁 Found ${currentBookmarks.length} items in "${folderName}" folder`);
+
+    } catch (error) {
+      console.error(`❌ Error loading folder "${folderName}":`, error);
+    }
+  }
+
+  return allItems;
+}
+
+/**
+ * Clean up "not interested" items from AI bookmark folders
+ */
+async function cleanupNotInterestedFromAIFolders(
+  client: KinoPubClient,
+  db: DatabaseService,
+  notInterestedItems: any[],
+  contentType: 'movie' | 'serial' | 'both'
+): Promise<void> {
+  if (notInterestedItems.length === 0) {
+    return; // No "not interested" items to clean up
+  }
+
+  console.log('\n🚫 Cleaning up "not interested" items from AI bookmark folders...');
+
+  try {
+    const notInterestedKinoPubIds = new Set(notInterestedItems.map(item => item.kinoPubId));
+    console.log(`🚫 Found ${notInterestedItems.length} "not interested" items to remove from AI folders`);
+
+    // Determine which folders to clean based on content type
+    const foldersToClean: string[] = [];
+    if (contentType === 'movie') {
+      foldersToClean.push('movies-ai');
+    } else if (contentType === 'serial') {
+      foldersToClean.push('tv-shows-ai');
+    } else {
+      foldersToClean.push('movies-ai', 'tv-shows-ai');
+    }
+
+    let totalRemoved = 0;
+
+    for (const folderName of foldersToClean) {
+      try {
+        // Find the AI folder
+        const aiFolder = await client.findBookmarkFolderByName(folderName);
+        if (!aiFolder) {
+          console.log(`📁 Folder "${folderName}" not found, skipping "not interested" cleanup`);
+          continue;
+        }
+
+        console.log(`📁 Cleaning "not interested" items from folder: "${folderName}" (ID: ${aiFolder.id})`);
+
+        // Get current bookmarks in the AI folder
+        const folderContent = await client.getBookmarkFolder(aiFolder.id);
+        // Handle different response structures - items can be in data.items or directly in response.items
+        const currentBookmarks = folderContent.data?.items || (folderContent as any).items || [];
+
+        console.log(`🔖 Checking ${currentBookmarks.length} items in "${folderName}" folder for "not interested" matches`);
+
+        let removedFromFolder = 0;
+
+        // Check each bookmark against "not interested" items
+        for (const bookmark of currentBookmarks) {
+          let shouldRemove = false;
+          let matchReason = '';
+
+          // Check for exact ID match
+          if (notInterestedKinoPubIds.has(bookmark.id)) {
+            shouldRemove = true;
+            matchReason = 'exact ID match';
+          } else {
+            // Check for title similarity (in case same content has different IDs)
+            const bookmarkTitle = bookmark.title.toLowerCase().trim();
+            for (const notInterestedItem of notInterestedItems) {
+              const notInterestedTitle = notInterestedItem.title.toLowerCase().trim();
+              
+              // Check if titles are very similar (contains or partial match)
+              if (bookmarkTitle.includes(notInterestedTitle) || notInterestedTitle.includes(bookmarkTitle)) {
+                shouldRemove = true;
+                matchReason = `title similarity with "${notInterestedItem.title}"`;
+                break;
+              }
+              
+              // Check if they're the same after removing common variations
+              const cleanBookmarkTitle = bookmarkTitle.replace(/[:\-\s]+/g, '').toLowerCase();
+              const cleanNotInterestedTitle = notInterestedTitle.replace(/[:\-\s]+/g, '').toLowerCase();
+              
+              if (cleanBookmarkTitle === cleanNotInterestedTitle) {
+                shouldRemove = true;
+                matchReason = `normalized title match with "${notInterestedItem.title}"`;
+                break;
+              }
+            }
+          }
+
+          if (shouldRemove) {
+            try {
+              console.log(`🚫 Removing "not interested" item: "${bookmark.title}" from ${folderName} (${matchReason})`);
+              await client.removeBookmark(bookmark.id, aiFolder.id);
+              removedFromFolder++;
+              totalRemoved++;
+
+              // Small delay to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 200));
+            } catch (error) {
+              console.error(`❌ Failed to remove "not interested" item "${bookmark.title}" from ${folderName}:`, error);
+            }
+          }
+        }
+
+        if (removedFromFolder > 0) {
+          console.log(`✅ Removed ${removedFromFolder} "not interested" items from "${folderName}"`);
+        } else {
+          console.log(`✅ No "not interested" items found in "${folderName}"`);
+        }
+
+      } catch (error) {
+        console.error(`❌ Error cleaning "not interested" items from folder "${folderName}":`, error);
+      }
+    }
+
+    if (totalRemoved > 0) {
+      console.log(`🚫 "Not interested" cleanup complete: removed ${totalRemoved} items from AI folders`);
+    } else {
+      console.log(`🚫 "Not interested" cleanup complete: no items needed removal`);
+    }
+
+  } catch (error) {
+    console.error('❌ Error during "not interested" AI folder cleanup:', error);
   }
 }
 

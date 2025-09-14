@@ -32,12 +32,9 @@ async function scanBookmarks(folderName: string = 'ai-recommendations'): Promise
       console.log(`📁 Found "${folderName}" folder (ID: ${folder.id})`);
     }
     
-    // Get items from the bookmark folder
+    // Get ALL items from the bookmark folder (handles pagination)
     console.log('📡 Fetching bookmark folder contents...');
-    const folderResponse = await client.getBookmarkFolder(folder.id);
-    
-    // Handle different response structures - items can be in data.items or directly in response.items
-    const items = folderResponse.data?.items || (folderResponse as any).items || [];
+    const items = await client.getAllBookmarkFolderItems(folder.id);
     console.log(`📚 Found ${items.length} items in "${folderName}" folder`);
     
     let addedCount = 0;
@@ -102,7 +99,7 @@ async function scanAllBookmarks(): Promise<void> {
     // Get all bookmark folders
     console.log('📁 Fetching all bookmark folders...');
     const foldersResponse = await client.getBookmarkFolders();
-    const folders = foldersResponse.data || (foldersResponse as any).items || [];
+    const folders = foldersResponse.items || [];
     
     console.log(`📁 Found ${folders.length} bookmark folders`);
     
@@ -112,8 +109,8 @@ async function scanAllBookmarks(): Promise<void> {
       console.log(`\n📂 Processing folder: "${folder.title}" (ID: ${folder.id})`);
       
       try {
-        const folderResponse = await client.getBookmarkFolder(folder.id);
-        const items = folderResponse.data?.items || (folderResponse as any).items || [];
+        // Get ALL items from the bookmark folder (handles pagination)
+        const items = await client.getAllBookmarkFolderItems(folder.id);
         
         console.log(`  📚 Found ${items.length} items`);
         

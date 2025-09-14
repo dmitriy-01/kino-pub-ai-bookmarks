@@ -1,5 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
-import { WatchedItem, BookmarkedItem } from './database';
+import { WatchedItem, BookmarkedItem, NotInterestedItem } from './database';
 
 export class AnthropicClient {
   private client: Anthropic;
@@ -21,9 +21,10 @@ export class AnthropicClient {
   async generateRecommendations(
     watchedItems: WatchedItem[],
     bookmarkedItems: BookmarkedItem[],
-    contentType: 'movie' | 'serial' | 'both' = 'both'
+    contentType: 'movie' | 'serial' | 'both' = 'both',
+    notInterestedItems: NotInterestedItem[] = []
   ): Promise<string[]> {
-    const prompt = this.buildRecommendationPrompt(watchedItems, bookmarkedItems, contentType);
+    const prompt = this.buildRecommendationPrompt(watchedItems, bookmarkedItems, contentType, notInterestedItems);
 
     try {
       const response = await this.client.messages.create({
@@ -52,7 +53,8 @@ export class AnthropicClient {
   private buildRecommendationPrompt(
     watchedItems: WatchedItem[],
     bookmarkedItems: BookmarkedItem[],
-    contentType: 'movie' | 'serial' | 'both'
+    contentType: 'movie' | 'serial' | 'both',
+    notInterestedItems: NotInterestedItem[] = []
   ): string {
     // Separate items by rating and notes
     const lovedItems = watchedItems.filter(item =>
@@ -116,6 +118,11 @@ export class AnthropicClient {
       return `${item.title}${yearStr}`;
     });
 
+    const notInterestedTitles = notInterestedItems.map(item => {
+      const yearStr = item.year ? ` (${item.year})` : '';
+      return `${item.title}${yearStr}`;
+    });
+
     const contentTypeText = contentType === 'both' ? 'movies and TV shows' :
       contentType === 'movie' ? 'movies' : 'TV shows';
 
@@ -153,19 +160,23 @@ export class AnthropicClient {
       prompt += `ALREADY BOOKMARKED - DO NOT RECOMMEND THESE:\n${bookmarkedTitles.join('\n')}\n\n`;
     }
 
+    if (notInterestedTitles.length > 0) {
+      prompt += `NOT INTERESTED - NEVER RECOMMEND THESE OR SIMILAR:\n${notInterestedTitles.join('\n')}\n\n`;
+    }
+
     // Create a comprehensive exclusion list
     const allWatchedTitles = watchedItems.map(item => {
       const yearStr = item.year ? ` (${item.year})` : '';
       return `${item.title}${yearStr}`;
     });
 
-    const allExcludedTitles = [...allWatchedTitles, ...bookmarkedTitles];
+    const allExcludedTitles = [...allWatchedTitles, ...bookmarkedTitles, ...notInterestedTitles];
 
     if (allExcludedTitles.length > 0) {
       prompt += `COMPLETE EXCLUSION LIST - NEVER RECOMMEND ANY OF THESE:\n${allExcludedTitles.join('\n')}\n\n`;
     }
 
-    prompt += `Please recommend 8-12 ${contentTypeText} that I would likely enjoy based on my preferences. Consider:
+    prompt += `Please recommend exactly 10 ${contentTypeText} that I would likely enjoy based on my preferences. Consider:
 1. My ratings to understand what I like/dislike
 2. Patterns in genres, themes, and styles I enjoy
 3. Weight preferences by watch completion percentage:
@@ -175,14 +186,16 @@ export class AnthropicClient {
    - Partially watched content (25-49%) = weak preference indicators
 4. Avoid content similar to what I disliked
 5. NEVER recommend anything from the EXCLUSION LIST above
-6. Include both popular and hidden gems
-7. Mix of recent releases and classics
-8. Focus on internationally popular content that would be available on streaming platforms
+6. Pay special attention to items marked as "NOT INTERESTED" - avoid similar themes, genres, or styles
+7. Include both popular and hidden gems
+8. Mix of recent releases and classics
+9. Focus on internationally popular content that would be available on streaming platforms
 
 IMPORTANT RESTRICTIONS:
 - DO NOT recommend any anime, animated series, or Japanese animation content
 - Focus on live-action content only
 - Provide titles in English only for consistency with search
+- Only suggest movies with IMDB rating ≥6.0 and TV shows with IMDB rating ≥7.0
 
 Format your response as a simple list, one per line:
 Title (Year)
@@ -197,6 +210,6 @@ Do not include explanations, just the list.`;
       .split('\n')
       .map(line => line.trim())
       .filter(line => line.length > 0 && line.includes('(') && line.includes(')'))
-      .slice(0, 12); // Allow up to 12 recommendations
+      .slice(0, 10); // Exactly 10 recommendations
   }
 }
